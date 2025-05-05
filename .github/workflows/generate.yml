@@ -1,0 +1,104 @@
+name: Generate ProtoBuf Files & Auto Tag
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Generator Repo
+        uses: actions/checkout@v3
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: 1.23
+
+      - name: Install Protobuf Compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Install Go Protobuf Tools
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.33.0
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.3.0
+
+      - name: Clone Proto Files Repository
+        run: |
+          git clone https://github.com/AskatNa/apis-statistics-service.git proto-src
+
+      - name: Generate Go Code from Proto Files
+        run: |
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          cd proto-src
+
+          echo "Directory structure:"
+          find . -type d
+
+          echo "Listing .proto files:"
+          find . -name "*.proto"
+
+          # Clean up previously generated files
+          find . -name "*.pb.go" -delete
+
+          # Generate Go files from all .proto definitions
+          echo "Generating .pb.go and _grpc.pb.go files..."
+          find . -name "*.proto" -exec \
+            protoc -I. \
+              --go_out=paths=source_relative:. \
+              --go-grpc_out=paths=source_relative:. \
+              {} +
+
+          echo "Generated files:"
+          find . -name "*.pb.go"
+
+          if [ -z "$(find . -name '*.pb.go')" ]; then
+            echo "Error: No .pb.go files were generated."
+            exit 1
+          fi
+
+      - name: Push Generated Code to Gen Repo
+        env:
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          git clone https://github.com/AskatNa/apis-gen-statistics-service.git gen-repo
+
+          # Ensure necessary dirs
+          mkdir -p gen-repo/base/frontend/v1
+          mkdir -p gen-repo/events/v1
+          mkdir -p gen-repo/service/frontend/client_stats/v1
+
+          # Copy over only the generated files (corrected source dir to proto-src)
+          rsync -av proto-src/base/frontend/v1/*.pb.go gen-repo/base/frontend/v1/ || true
+          rsync -av proto-src/events/v1/*.pb.go gen-repo/events/v1/ || true
+          rsync -av proto-src/service/frontend/client_stats/v1/*.pb.go gen-repo/service/frontend/client_stats/v1/ || true
+
+          # Debug output
+          echo "Listing generated .pb.go files in gen-repo:"
+          find gen-repo -name "*.pb.go"
+
+          cd gen-repo
+
+          git config --global user.name "AskatNa"
+          git config --global user.email "231308@astanait.edu.kz"
+
+          git add .
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit. Skipping commit and push."
+          else
+            git commit -m "Regenerate proto Go files"
+            NEW_TAG="v0.0.$(date +%s)"
+            git tag "$NEW_TAG"
+            git remote set-url origin https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/AskatNa/apis-gen-statistics-service.git
+            git push origin master --follow-tags
+          fi
